@@ -1,0 +1,6 @@
+policy: storage
+group_name: group-storage
+initial_quota: 12582912
+bandwidth_limit: 5242880
+carry_over_enabled: true
+log_filtering_decisions: true

@@ -1,0 +1,4 @@
+policy: privacy
+group_name: group-privacy
+redact_emails: false
+exclude_patterns: []
