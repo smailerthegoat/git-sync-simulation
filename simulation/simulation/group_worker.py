@@ -45,7 +45,6 @@ class GroupWorker(threading.Thread):
             try:
                 lock = self._lock or _noop_lock
                 with lock:
-                    self.repo.git.checkout(self.branch_name)
                     hexsha, file_meta = generate_commit(
                         self.repo, self.branch_name, self.group_name, self.rng)
                 self.commit_count += 1
