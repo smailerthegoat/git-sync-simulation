@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Git Sync Simulation — Implementation Details</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --accent4: #f0883e;
+    --red: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+
+  h1 {
+    font-size: 2.2rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.6rem;
+    margin-bottom: 1.5rem;
+    color: #fff;
+  }
+  h2 {
+    font-size: 1.5rem;
+    color: var(--accent);
+    margin: 2rem 0 0.8rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+  }
+  h3 {
+    font-size: 1.15rem;
+    color: var(--accent3);
+    margin: 1.4rem 0 0.5rem;
+  }
+  p, li { margin-bottom: 0.5rem; }
+  ul { padding-left: 1.5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15em 0.4em;
+    font-size: 0.9em;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    margin: 0.8rem 0;
+  }
+  pre code { background: none; border: none; padding: 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); color: var(--accent); font-weight: 600; }
+  td { background: var(--bg); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.2rem;
+    margin: 1rem 0;
+  }
+  .card h3 { margin-top: 0; }
+
+  .tag {
+    display: inline-block;
+    border-radius: 12px;
+    padding: 0.15em 0.6em;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-right: 0.3rem;
+  }
+  .tag-green  { background: #1b4332; color: #3fb950; border: 1px solid #2ea04370; }
+  .tag-blue   { background: #0c2d6b; color: #58a6ff; border: 1px solid #388bfd70; }
+  .tag-purple { background: #2a1248; color: #d2a8ff; border: 1px solid #8b5cf670; }
+  .tag-orange { background: #3d2008; color: #f0883e; border: 1px solid #d1860270; }
+  .tag-red    { background: #3d0d0d; color: #f85149; border: 1px solid #f8514970; }
+
+  .flow-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    white-space: pre;
+    overflow-x: auto;
+    margin: 1rem 0;
+  }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+
+  .badge {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 0.7rem;
+    font-weight: 700;
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+    vertical-align: middle;
+    margin-left: 0.3rem;
+  }
+
+  .separator {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2rem 0;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Git Sync Simulation &mdash; Implementation Details</h1>
+<p style="color:var(--text-muted); margin-bottom:1.5rem;">
+  A multi-threaded simulation of policy-filtered patch synchronization across parallel Git branches.
+</p>
+
+<!-- ============================================================ -->
+<h2>1. Project Structure</h2>
+
+<pre><code>git-sync-simulation/
+&#9500;&#9472;&#9472; README.md                        # Project overview &amp; quick start
+&#9500;&#9472;&#9472; BRANCH.md                        # Branch description marker
+&#9500;&#9472;&#9472; requirements.txt                 # Python dependencies
+&#9500;&#9472;&#9472; bootstrap_inside_repo.sh         # Full project setup script (848 lines)
+&#9500;&#9472;&#9472; clean.py                         # Reset branches between simulation runs
+&#9500;&#9472;&#9472; implementation-details.html      # This file
+&#9492;&#9472;&#9472; simulation/
+    &#9500;&#9472;&#9472; __init__.py                  # Package marker
+    &#9500;&#9472;&#9472; app.py                       # Streamlit dashboard (skeleton)
+    &#9500;&#9472;&#9472; main.py                      # Headless CLI entry point
+    &#9500;&#9472;&#9472; config/
+    &#9474;   &#9500;&#9472;&#9472; group_storage.yaml   # Storage-constrained policy config
+    &#9474;   &#9500;&#9472;&#9472; group_privacy.yaml   # Privacy-constrained policy config
+    &#9474;   &#9492;&#9472;&#9472; group_unconstrained.yaml # Unconstrained policy config
+    &#9492;&#9472;&#9472; simulation/
+        &#9500;&#9472;&#9472; __init__.py
+        &#9500;&#9472;&#9472; policy.py                # Policy engine &amp; filtering logic
+        &#9500;&#9472;&#9472; commit_generator.py      # Random file &amp; commit generation
+        &#9500;&#9472;&#9472; group_worker.py          # Per-branch worker thread
+        &#9500;&#9472;&#9472; sync_engine.py           # Patch filtering &amp; sync via format-patch/am
+        &#9500;&#9472;&#9472; cycle_manager.py         # 60-second cycle timer + quota reset
+        &#9492;&#9472;&#9472; sync_scheduler.py        # Random sync trigger scheduler</code></pre>
+
+<!-- ============================================================ -->
+<h2>2. File-by-File Breakdown</h2>
+
+<!-- ---- Entry Points ---- -->
+<h3>Entry Points</h3>
+
+<div class="card">
+  <h3><code>simulation/main.py</code> <span class="badge">ENTRY POINT</span></h3>
+  <p>Headless CLI that orchestrates the entire simulation without Streamlit.</p>
+  <table>
+    <tr><th>Aspect</th><th>Detail</th></tr>
+    <tr><td>CLI Args</td><td><code>--duration</code> (default 180s), <code>--seed</code> (default 42), <code>--push</code> (flag)</td></tr>
+    <tr><td>Threads Launched</td><td>3&times; <code>GroupWorker</code>, 1&times; <code>CycleManager</code>, 1&times; <code>SyncScheduler</code></td></tr>
+    <tr><td>Main Loop</td><td>Pulls events from a shared <code>queue.Queue</code> and logs COMMIT / SYNC / CYCLE_END / ERROR</td></tr>
+    <tr><td>Locking</td><td>Injects a single <code>threading.Lock</code> shared across all workers for checkout safety</td></tr>
+    <tr><td>Shutdown</td><td>Graceful via <code>KeyboardInterrupt</code> &mdash; stops all threads, joins with 5s timeout</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3><code>simulation/app.py</code> <span class="tag tag-orange">SKELETON</span></h3>
+  <p>Streamlit dashboard placeholder. Sets page config, shows a status table, and displays "Full UI implemented in Step 7".</p>
+</div>
+
+<!-- ---- Config ---- -->
+<h3>Configuration Files</h3>
+
+<div class="grid">
+  <div class="card">
+    <h3><code>config/group_storage.yaml</code></h3>
+    <ul>
+      <li><strong>policy:</strong> storage</li>
+      <li><strong>initial_quota:</strong> 12,582,912 bytes (12 MB)</li>
+      <li><strong>bandwidth_limit:</strong> 5,242,880 bytes (5 MB/sync)</li>
+      <li><strong>carry_over_enabled:</strong> true</li>
+      <li><strong>log_filtering_decisions:</strong> true</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3><code>config/group_privacy.yaml</code></h3>
+    <ul>
+      <li><strong>policy:</strong> privacy</li>
+      <li><strong>redact_emails:</strong> false (stub)</li>
+      <li><strong>exclude_patterns:</strong> [] (stub)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="card" style="max-width:calc(50% - 0.5rem);">
+  <h3><code>config/group_unconstrained.yaml</code></h3>
+  <ul>
+    <li><strong>policy:</strong> unconstrained</li>
+    <li>No constraints configured</li>
+  </ul>
+</div>
+
+<!-- ---- Core Modules ---- -->
+<h3>Core Simulation Modules</h3>
+
+<div class="card">
+  <h3><code>simulation/simulation/policy.py</code> <span class="tag tag-blue">126 lines</span></h3>
+  <p>Abstract policy engine with factory method and three concrete implementations.</p>
+
+  <table>
+    <tr><th>Class / Dataclass</th><th>Purpose</th></tr>
+    <tr>
+      <td><code>PatchInfo</code></td>
+      <td>Dataclass holding patch metadata: <code>filename</code>, <code>size_bytes</code>, <code>commit_hash</code>, <code>commit_message</code></td>
+    </tr>
+    <tr>
+      <td><code>FilterResult</code></td>
+      <td>Dataclass for sync results: lists of accepted/rejected <code>PatchInfo</code>, byte counts, reason string</td>
+    </tr>
+    <tr>
+      <td><code>Policy</code> (ABC)</td>
+      <td>Base class with <code>from_yaml()</code> factory and abstract <code>filter_patches()</code></td>
+    </tr>
+    <tr>
+      <td><code>StoragePolicy</code></td>
+      <td>Bandwidth + quota constrained. Tracks <code>quota_bytes</code>, <code>bandwidth_limit</code>, <code>accepted_this_cycle</code>. Accepts patches up to <code>min(bandwidth_limit, quota_remaining)</code>. Has <code>recalculate_quota()</code> for carry-over logic.</td>
+    </tr>
+    <tr>
+      <td><code>PrivacyPolicy</code></td>
+      <td>Stub &mdash; currently accepts all patches. Has <code>apply_privacy_filter()</code> hook for future redaction.</td>
+    </tr>
+    <tr>
+      <td><code>UnconstrainedPolicy</code></td>
+      <td>Always accepts all patches, no restrictions.</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3><code>simulation/simulation/commit_generator.py</code> <span class="tag tag-blue">69 lines</span></h3>
+  <p>Generates random dummy data commits on a branch.</p>
+  <ul>
+    <li><strong>Total size per commit:</strong> 0.8 &ndash; 3.2 MB (random)</li>
+    <li><strong>Files per commit:</strong> 1 &ndash; 4 (random split)</li>
+    <li><strong>File types:</strong> <code>.bin</code>, <code>.dat</code> (random bytes), <code>.txt</code> (repeated text)</li>
+    <li><strong>Directory structure:</strong> <code>data/{group_name}/{ISO_timestamp}/</code></li>
+    <li><strong>Commit message:</strong> Includes <code>total_size_mb</code> field used by sync engine for size parsing</li>
+    <li><strong>Key function:</strong> <code>generate_commit(repo, branch_name, group_name, rng)</code> &rarr; <code>(hexsha, file_meta)</code></li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><code>simulation/simulation/group_worker.py</code> <span class="tag tag-blue">78 lines</span></h3>
+  <p>Per-branch daemon thread that generates commits at random intervals.</p>
+  <ul>
+    <li><strong>Interval:</strong> 12 &ndash; 22 seconds between commits (configurable via <code>rng.uniform</code>)</li>
+    <li><strong>Per commit:</strong> Acquires shared lock &rarr; <code>git checkout branch</code> &rarr; <code>generate_commit()</code> &rarr; posts event to queue</li>
+    <li><strong>Push support:</strong> Optional <code>enable_push</code> flag pushes after each commit</li>
+    <li><strong>Clean shutdown:</strong> <code>stop()</code> sets a threading.Event; worker checks every 0.3s</li>
+    <li><strong>Lock injection:</strong> <code>_lock</code> attribute set by <code>main.py</code> for checkout serialization</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><code>simulation/simulation/sync_engine.py</code> <span class="tag tag-blue">119 lines</span></h3>
+  <p>Core sync logic: extracts patches from source, filters via policy, applies to destination.</p>
+  <ul>
+    <li><strong>Patch extraction:</strong> <code>git format-patch</code> generates <code>.patch</code> files in a temp directory</li>
+    <li><strong>Size parsing:</strong> Regex extracts <code>total_size_mb</code> from patch content</li>
+    <li><strong>Policy filtering:</strong> Calls destination branch's <code>policy.filter_patches()</code></li>
+    <li><strong>Patch application:</strong> <code>git am --ignore-whitespace</code> applies accepted patches</li>
+    <li><strong>Merge commit:</strong> Empty commit recording policy decisions (accepted/rejected MB, quota state)</li>
+    <li><strong>State tracking:</strong> <code>_last_synced</code> dict remembers last synced SHA per (src, dst) pair</li>
+    <li><strong>Error handling:</strong> <code>git am --abort</code> on failure, continues with remaining patches</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><code>simulation/simulation/cycle_manager.py</code> <span class="tag tag-blue">57 lines</span></h3>
+  <p>Manages 60-second quota cycles and triggers recalculation.</p>
+  <ul>
+    <li><strong>Cycle length:</strong> 60 seconds (configurable)</li>
+    <li><strong>End-of-cycle:</strong> Increments <code>cycle_number</code>, calls <code>recalculate_quota()</code> on all <code>StoragePolicy</code> instances</li>
+    <li><strong>Carry-over formula:</strong> <code>new_quota = remaining_bytes / cycle_length_seconds</code></li>
+    <li><strong>Event:</strong> Posts <code>cycle_end</code> with quota update details (old_mb, new_mb per group)</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><code>simulation/simulation/sync_scheduler.py</code> <span class="tag tag-blue">59 lines</span></h3>
+  <p>Triggers <code>SyncEngine.sync()</code> at random intervals with manual override support.</p>
+  <ul>
+    <li><strong>Interval:</strong> 25 &ndash; 45 seconds between automatic syncs</li>
+    <li><strong>Branch selection:</strong> <code>rng.sample(branches, k=2)</code> picks random (src, dst) pair</li>
+    <li><strong>Manual trigger:</strong> <code>trigger_manual(src, dst)</code> queues immediate sync (polled every 0.3s)</li>
+    <li><strong>Error handling:</strong> Posts error event on sync failure, does not crash the thread</li>
+  </ul>
+</div>
+
+<!-- ---- Setup & Cleanup ---- -->
+<h3>Setup &amp; Cleanup Scripts</h3>
+
+<div class="card">
+  <h3><code>bootstrap_inside_repo.sh</code> <span class="tag tag-green">848 lines</span></h3>
+  <p>Master setup script that scaffolds the entire project from scratch:</p>
+  <ol>
+    <li>Configures git settings (<code>core.autocrlf = false</code>)</li>
+    <li>Creates all project files, directories, and YAML configs</li>
+    <li>Writes all Python simulation modules inline</li>
+    <li>Commits everything to <code>main</code> and pushes to GitHub</li>
+    <li>Creates and pushes three group branches</li>
+    <li>Sets up Python virtual environment and installs dependencies</li>
+    <li>Runs smoke tests on the policy module</li>
+  </ol>
+</div>
+
+<div class="card">
+  <h3><code>clean.py</code> <span class="tag tag-green">127 lines</span></h3>
+  <p>Resets simulation branches to pre-data state between runs:</p>
+  <ol>
+    <li>Removes stale <code>.lock</code> files from <code>.git/</code></li>
+    <li>Tears down any lingering git worktrees</li>
+    <li>Finds the "clean base" commit (last commit before any <code>data/</code> files) per branch</li>
+    <li>Force-resets each branch ref to that base commit</li>
+    <li>Deletes the <code>data/</code> directory from the working tree</li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. Process Flow</h2>
+
+<div class="flow-diagram">
+<span style="color:var(--accent)">STARTUP</span> (main.py)
+  |
+  +-- Parse CLI args (--duration, --seed, --push)
+  +-- Open git.Repo at repo root
+  +-- Load 3 policies from YAML configs
+  +-- Create shared event queue + threading lock
+  |
+  +-- Launch <span style="color:var(--accent2)">GroupWorker</span> x3 (one per branch)
+  +-- Launch <span style="color:var(--accent3)">CycleManager</span> (60s timer)
+  +-- Launch <span style="color:var(--accent4)">SyncScheduler</span> (25-45s random timer)
+  |
+  v
+
+<span style="color:var(--accent)">PARALLEL THREADS</span>
+  |
+  +--[<span style="color:var(--accent2)">GroupWorker-storage</span>]-----+
+  |   Every 12-22s:             |
+  |   1. Acquire lock           |
+  |   2. git checkout branch    |    All threads post
+  |   3. generate_commit()      |    events to shared
+  |   4. Post COMMIT event      +---&gt; queue.Queue
+  |                             |
+  +--[<span style="color:var(--accent2)">GroupWorker-privacy</span>]----+
+  |   (same as above)           |
+  |                             |
+  +--[<span style="color:var(--accent2)">GroupWorker-unconstrained</span>]+
+  |   (same as above)           |
+  |                             |
+  +--[<span style="color:var(--accent3)">CycleManager</span>]----------+
+  |   Every 60s:                |
+  |   1. Increment cycle_number |
+  |   2. For StoragePolicy:     |
+  |      recalculate_quota()    |
+  |   3. Post CYCLE_END event   |
+  |                             |
+  +--[<span style="color:var(--accent4)">SyncScheduler</span>]---------+
+      Every 25-45s:             |
+      1. Pick random (src, dst) |
+      2. SyncEngine.sync():     |
+         a. format-patch src    |
+         b. Build PatchInfo[]   |
+         c. Policy.filter()     |
+         d. git am accepted     |
+         e. Merge commit        |
+      3. Post SYNC event -------+
+
+<span style="color:var(--accent)">MAIN LOOP</span>
+  |
+  v
+  Pulls events from queue (1s timeout)
+  Logs each event:
+    COMMIT  group-name    X.XX MB  (N files)  hexsha
+    SYNC    src -> dst    accepted=X.XX MB  rejected=X.XX MB
+    CYCLE   #N complete   quota_updates={...}
+    ERROR   message
+
+<span style="color:var(--red)">SHUTDOWN</span> (KeyboardInterrupt or duration elapsed)
+  |
+  +-- Stop all GroupWorkers
+  +-- Stop SyncScheduler
+  +-- Stop CycleManager
+  +-- Join all threads (5s timeout)
+  +-- Log "Simulation stopped."
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Policy Mechanics</h2>
+
+<h3>StoragePolicy (group-storage)</h3>
+<div class="card">
+  <p><strong>Constraint model:</strong> Dual-limited by per-sync bandwidth and per-cycle quota.</p>
+  <pre><code>sync_budget = min(bandwidth_limit, quota_remaining)
+
+For each patch in order:
+    if accumulated + patch.size_bytes &lt;= sync_budget:
+        ACCEPT patch
+        accumulated += patch.size_bytes
+    else:
+        REJECT patch
+
+quota_remaining -= accumulated   (tracked via accepted_this_cycle)</code></pre>
+
+  <h3 style="margin-top:1rem;">Carry-Over Logic (end of cycle)</h3>
+  <pre><code>remaining = quota_bytes - accepted_this_cycle
+new_quota = remaining // cycle_length_seconds
+accepted_this_cycle = 0</code></pre>
+  <p style="color:var(--text-muted);">
+    This creates a "starvation" effect: if a group doesn't use its full quota,
+    the carry-over divides the remainder by 60, yielding a tiny next-cycle budget.
+    This incentivizes efficient bandwidth usage.
+  </p>
+</div>
+
+<h3>PrivacyPolicy (group-privacy)</h3>
+<div class="card">
+  <p><span class="tag tag-orange">STUB</span> Currently a no-op &mdash; accepts all patches unconditionally.</p>
+  <p>Prepared for future implementation with <code>redact_emails</code> and <code>exclude_patterns</code> config hooks, plus an <code>apply_privacy_filter()</code> method.</p>
+</div>
+
+<h3>UnconstrainedPolicy (group-unconstrained)</h3>
+<div class="card">
+  <p><span class="tag tag-green">PASS-THROUGH</span> Accepts all patches with no restrictions. Returns total size in reason string.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Sync Engine Detail</h2>
+
+<div class="card">
+  <h3>Step-by-Step Sync Process</h3>
+  <ol style="padding-left:1.2rem;">
+    <li><strong>Check last synced:</strong> Look up <code>_last_synced[(src, dst)]</code> for the SHA of the last synced commit</li>
+    <li><strong>Generate patches:</strong> <code>git format-patch --output-directory /tmp/gitsync_xxx {since}..{src}</code></li>
+    <li><strong>Parse sizes:</strong> Regex <code>total_size_mb:\s*([\d.]+)</code> extracts MB from patch content; defaults to 0.5 MB if missing</li>
+    <li><strong>Policy filter:</strong> Call <code>policies[dst].filter_patches(patches, cycle_number)</code></li>
+    <li><strong>Apply accepted:</strong> <code>git checkout dst</code> then <code>git am --ignore-whitespace</code> for each accepted patch</li>
+    <li><strong>Merge commit:</strong> Empty commit on dst recording: policy name, accepted/rejected MB, patch counts, quota state</li>
+    <li><strong>Update tracking:</strong> Store current src HEAD as <code>_last_synced[(src, dst)]</code></li>
+    <li><strong>Post event:</strong> SYNC event with all metrics to the shared queue</li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. Timing &amp; Expected Throughput</h2>
+
+<table>
+  <tr><th>Component</th><th>Interval</th><th>Expected Rate (60s run)</th></tr>
+  <tr><td>GroupWorker commits</td><td>12 &ndash; 22s per worker</td><td>~3&ndash;5 commits/worker &rarr; 9&ndash;15 total</td></tr>
+  <tr><td>SyncScheduler syncs</td><td>25 &ndash; 45s</td><td>~1&ndash;2 syncs</td></tr>
+  <tr><td>CycleManager cycles</td><td>60s</td><td>1 cycle boundary</td></tr>
+  <tr><td>Commit size</td><td>0.8 &ndash; 3.2 MB each</td><td>~15&ndash;30 MB total data generated</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. Threading &amp; Concurrency Model</h2>
+
+<div class="card">
+  <table>
+    <tr><th>Thread</th><th>Daemon?</th><th>Shared Resources</th></tr>
+    <tr><td>GroupWorker &times;3</td><td>Yes</td><td>git.Repo, Lock, Queue</td></tr>
+    <tr><td>CycleManager</td><td>Yes</td><td>Policies dict, Queue</td></tr>
+    <tr><td>SyncScheduler</td><td>Yes</td><td>SyncEngine, Queue</td></tr>
+  </table>
+  <p style="margin-top:0.8rem;"><strong>Lock strategy:</strong> A single <code>threading.Lock</code> serializes all <code>git checkout</code> operations.
+     Workers acquire the lock before checkout + commit, and the SyncEngine also checks out branches under the same lock (implicitly, via the repo object).
+     This prevents concurrent checkouts from corrupting the git index.</p>
+  <p><strong>Event queue:</strong> All threads post structured dicts to a shared <code>queue.Queue</code>. The main loop pulls events with a 1-second timeout and logs them. This decouples event production from consumption.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>8. Dependencies</h2>
+
+<table>
+  <tr><th>Package</th><th>Version</th><th>Purpose</th></tr>
+  <tr><td>gitpython</td><td>&ge; 3.1.43</td><td>Git operations (checkout, commit, format-patch, am)</td></tr>
+  <tr><td>pyyaml</td><td>&ge; 6.0.1</td><td>Parse YAML policy configs</td></tr>
+  <tr><td>pydantic</td><td>&ge; 2.7.0</td><td>Data validation (available but not currently used)</td></tr>
+  <tr><td>streamlit</td><td>&ge; 1.35.0</td><td>Dashboard UI (skeleton only)</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>9. Branch Layout</h2>
+
+<div class="card">
+  <table>
+    <tr><th>Branch</th><th>Base</th><th>Contents</th></tr>
+    <tr>
+      <td><code>main</code></td>
+      <td>&mdash;</td>
+      <td>Initial scaffold: all source files, configs, bootstrap script</td>
+    </tr>
+    <tr>
+      <td><code>group-storage</code></td>
+      <td>main</td>
+      <td>Diverges with auto-generated <code>data/group-storage/</code> commits + synced patches</td>
+    </tr>
+    <tr>
+      <td><code>group-privacy</code></td>
+      <td>main</td>
+      <td>Diverges with auto-generated <code>data/group-privacy/</code> commits + synced patches</td>
+    </tr>
+    <tr>
+      <td><code>group-unconstrained</code></td>
+      <td>main</td>
+      <td>Refactored version (worktree support, clean.py). Diverges with <code>data/</code> commits</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<h2>10. Usage</h2>
+
+<pre><code># First-time setup
+bash bootstrap_inside_repo.sh
+
+# Activate virtual environment
+source .venv/bin/activate
+
+# Run simulation (headless, 60 seconds)
+python simulation/main.py --duration 60 --seed 42
+
+# Run with remote push enabled
+python simulation/main.py --duration 180 --seed 42 --push
+
+# Clean between runs (reset branches to pre-data state)
+python clean.py
+
+# Launch Streamlit dashboard (skeleton)
+streamlit run simulation/app.py</code></pre>
+
+<hr class="separator">
+<p style="color:var(--text-muted); text-align:center; font-size:0.85rem;">
+  Generated on 2026-03-30 &mdash; Git Sync Simulation Implementation Details
+</p>
+
+</div>
+</body>
+</html>
