@@ -146,7 +146,7 @@
 
 <h1>Git Sync Simulation &mdash; Implementation Details</h1>
 <p style="color:var(--text-muted); margin-bottom:1.5rem;">
-  A multi-threaded simulation of policy-filtered patch synchronization across parallel Git branches.
+  A multi-threaded simulation of policy-filtered file-copy synchronization across parallel Git branches using dedicated worktrees.
 </p>
 
 <!-- ============================================================ -->
@@ -172,7 +172,7 @@
         &#9500;&#9472;&#9472; policy.py                # Policy engine &amp; filtering logic
         &#9500;&#9472;&#9472; commit_generator.py      # Random file &amp; commit generation
         &#9500;&#9472;&#9472; group_worker.py          # Per-branch worker thread
-        &#9500;&#9472;&#9472; sync_engine.py           # Patch filtering &amp; sync via format-patch/am
+        &#9500;&#9472;&#9472; sync_engine.py           # Policy filtering &amp; file-copy sync between worktrees
         &#9500;&#9472;&#9472; cycle_manager.py         # 60-second cycle timer + quota reset
         &#9492;&#9472;&#9472; sync_scheduler.py        # Random sync trigger scheduler</code></pre>
 
@@ -190,8 +190,9 @@
     <tr><td>CLI Args</td><td><code>--duration</code> (default 180s), <code>--seed</code> (default 42), <code>--push</code> (flag)</td></tr>
     <tr><td>Threads Launched</td><td>3&times; <code>GroupWorker</code>, 1&times; <code>CycleManager</code>, 1&times; <code>SyncScheduler</code></td></tr>
     <tr><td>Main Loop</td><td>Pulls events from a shared <code>queue.Queue</code> and logs COMMIT / SYNC / CYCLE_END / ERROR</td></tr>
-    <tr><td>Locking</td><td>Injects a single <code>threading.Lock</code> shared across all workers for checkout safety</td></tr>
-    <tr><td>Shutdown</td><td>Graceful via <code>KeyboardInterrupt</code> &mdash; stops all threads, joins with 5s timeout</td></tr>
+    <tr><td>Worktrees</td><td>Creates a dedicated git worktree per branch via <code>setup_worktrees()</code> &mdash; each worker gets its own isolated repo</td></tr>
+    <tr><td>Locking</td><td>Injects a single <code>threading.Lock</code> shared across all workers for git operation safety</td></tr>
+    <tr><td>Shutdown</td><td>Graceful via <code>KeyboardInterrupt</code> &mdash; stops all threads, joins with 5s timeout, tears down worktrees</td></tr>
   </table>
 </div>
 
@@ -282,28 +283,29 @@
 </div>
 
 <div class="card">
-  <h3><code>simulation/simulation/group_worker.py</code> <span class="tag tag-blue">78 lines</span></h3>
+  <h3><code>simulation/simulation/group_worker.py</code> <span class="tag tag-blue">77 lines</span></h3>
   <p>Per-branch daemon thread that generates commits at random intervals.</p>
   <ul>
     <li><strong>Interval:</strong> 12 &ndash; 22 seconds between commits (configurable via <code>rng.uniform</code>)</li>
-    <li><strong>Per commit:</strong> Acquires shared lock &rarr; <code>git checkout branch</code> &rarr; <code>generate_commit()</code> &rarr; posts event to queue</li>
+    <li><strong>Per commit:</strong> Acquires shared lock &rarr; <code>generate_commit()</code> directly on worktree repo &rarr; posts event to queue</li>
+    <li><strong>No checkout needed:</strong> Each worker receives a worktree repo already on its branch</li>
     <li><strong>Push support:</strong> Optional <code>enable_push</code> flag pushes after each commit</li>
     <li><strong>Clean shutdown:</strong> <code>stop()</code> sets a threading.Event; worker checks every 0.3s</li>
-    <li><strong>Lock injection:</strong> <code>_lock</code> attribute set by <code>main.py</code> for checkout serialization</li>
   </ul>
 </div>
 
 <div class="card">
-  <h3><code>simulation/simulation/sync_engine.py</code> <span class="tag tag-blue">119 lines</span></h3>
-  <p>Core sync logic: extracts patches from source, filters via policy, applies to destination.</p>
+  <h3><code>simulation/simulation/sync_engine.py</code> <span class="tag tag-blue">192 lines</span></h3>
+  <p>Core sync logic using worktree-based file copy instead of format-patch/git am.</p>
   <ul>
-    <li><strong>Patch extraction:</strong> <code>git format-patch</code> generates <code>.patch</code> files in a temp directory</li>
-    <li><strong>Size parsing:</strong> Regex extracts <code>total_size_mb</code> from patch content</li>
-    <li><strong>Policy filtering:</strong> Calls destination branch's <code>policy.filter_patches()</code></li>
-    <li><strong>Patch application:</strong> <code>git am --ignore-whitespace</code> applies accepted patches</li>
+    <li><strong>Commit discovery:</strong> <code>git log --format=%H {range} -- data/</code> finds new commits on source branch</li>
+    <li><strong>Size parsing:</strong> Regex extracts <code>total_size_mb</code> from commit messages; defaults to 0.5 MB if missing</li>
+    <li><strong>Policy filtering:</strong> Calls destination branch's <code>policy.filter_patches()</code> to decide accept/reject</li>
+    <li><strong>File copy:</strong> For each accepted commit, <code>git diff-tree</code> lists <code>data/</code> files, then <code>shutil.copy2</code> copies them from source worktree to destination worktree</li>
+    <li><strong>Commit in destination:</strong> <code>git add data/</code> + <code>git commit</code> with original commit message preserved</li>
     <li><strong>Merge commit:</strong> Empty commit recording policy decisions (accepted/rejected MB, quota state)</li>
     <li><strong>State tracking:</strong> <code>_last_synced</code> dict remembers last synced SHA per (src, dst) pair</li>
-    <li><strong>Error handling:</strong> <code>git am --abort</code> on failure, continues with remaining patches</li>
+    <li><strong>No checkout needed:</strong> Main repo is read-only; all writes go through per-branch worktree repos</li>
   </ul>
 </div>
 
@@ -368,8 +370,9 @@
   +-- Open git.Repo at repo root
   +-- Load 3 policies from YAML configs
   +-- Create shared event queue + threading lock
+  +-- Create git worktrees (one per branch, no checkout juggling)
   |
-  +-- Launch <span style="color:var(--accent2)">GroupWorker</span> x3 (one per branch)
+  +-- Launch <span style="color:var(--accent2)">GroupWorker</span> x3 (each gets its own worktree repo)
   +-- Launch <span style="color:var(--accent3)">CycleManager</span> (60s timer)
   +-- Launch <span style="color:var(--accent4)">SyncScheduler</span> (25-45s random timer)
   |
@@ -379,10 +382,10 @@
   |
   +--[<span style="color:var(--accent2)">GroupWorker-storage</span>]-----+
   |   Every 12-22s:             |
-  |   1. Acquire lock           |
-  |   2. git checkout branch    |    All threads post
-  |   3. generate_commit()      |    events to shared
-  |   4. Post COMMIT event      +---&gt; queue.Queue
+  |   1. Acquire lock           |    All threads post
+  |   2. generate_commit()      |    events to shared
+  |      (writes to worktree)   |    queue.Queue
+  |   3. Post COMMIT event      +---&gt;
   |                             |
   +--[<span style="color:var(--accent2)">GroupWorker-privacy</span>]----+
   |   (same as above)           |
@@ -401,11 +404,13 @@
       Every 25-45s:             |
       1. Pick random (src, dst) |
       2. SyncEngine.sync():     |
-         a. format-patch src    |
+         a. git log new commits |
          b. Build PatchInfo[]   |
          c. Policy.filter()     |
-         d. git am accepted     |
-         e. Merge commit        |
+         d. Copy data/ files    |
+            src wt -&gt; dst wt    |
+         e. Commit in dst wt    |
+         f. Policy merge commit |
       3. Post SYNC event -------+
 
 <span style="color:var(--accent)">MAIN LOOP</span>
@@ -424,6 +429,7 @@
   +-- Stop SyncScheduler
   +-- Stop CycleManager
   +-- Join all threads (5s timeout)
+  +-- Teardown all worktrees
   +-- Log "Simulation stopped."
 </div>
 
@@ -470,17 +476,26 @@ accepted_this_cycle = 0</code></pre>
 <h2>5. Sync Engine Detail</h2>
 
 <div class="card">
-  <h3>Step-by-Step Sync Process</h3>
+  <h3>Step-by-Step Sync Process (File-Copy Strategy)</h3>
   <ol style="padding-left:1.2rem;">
     <li><strong>Check last synced:</strong> Look up <code>_last_synced[(src, dst)]</code> for the SHA of the last synced commit</li>
-    <li><strong>Generate patches:</strong> <code>git format-patch --output-directory /tmp/gitsync_xxx {since}..{src}</code></li>
-    <li><strong>Parse sizes:</strong> Regex <code>total_size_mb:\s*([\d.]+)</code> extracts MB from patch content; defaults to 0.5 MB if missing</li>
-    <li><strong>Policy filter:</strong> Call <code>policies[dst].filter_patches(patches, cycle_number)</code></li>
-    <li><strong>Apply accepted:</strong> <code>git checkout dst</code> then <code>git am --ignore-whitespace</code> for each accepted patch</li>
-    <li><strong>Merge commit:</strong> Empty commit on dst recording: policy name, accepted/rejected MB, patch counts, quota state</li>
+    <li><strong>Discover new commits:</strong> <code>git log --format=%H {since}..{src} -- data/</code> finds commits with data files (oldest first)</li>
+    <li><strong>Build PatchInfo:</strong> For each commit, read the commit message and extract <code>total_size_mb</code> via regex; defaults to 0.5 MB if missing</li>
+    <li><strong>Policy filter:</strong> Call <code>policies[dst].filter_patches(patches, cycle_number)</code> to decide accept/reject</li>
+    <li><strong>Copy accepted files:</strong> For each accepted commit, <code>git diff-tree</code> lists <code>data/</code> files, then <code>shutil.copy2</code> copies them from the source worktree directory into the destination worktree directory</li>
+    <li><strong>Commit in destination:</strong> <code>git add data/</code> + <code>git commit</code> in the destination worktree, preserving the original commit message</li>
+    <li><strong>Merge commit:</strong> Empty commit on dst worktree recording: policy name, accepted/rejected MB, patch counts, quota state</li>
     <li><strong>Update tracking:</strong> Store current src HEAD as <code>_last_synced[(src, dst)]</code></li>
     <li><strong>Post event:</strong> SYNC event with all metrics to the shared queue</li>
   </ol>
+</div>
+
+<div class="card">
+  <h3>Why File-Copy Instead of format-patch / git am?</h3>
+  <p>On WSL2/NTFS, <code>git am</code> and <code>format-patch</code> are fragile due to stat-cache dirty-index false positives.
+     Direct file copy between worktrees avoids all index-lock and dirty-index issues entirely.
+     Each branch has a dedicated worktree so no <code>git checkout</code> juggling is needed &mdash; the main repo is used read-only for <code>git log</code> and <code>merge_base</code>,
+     while all writes go through the per-branch worktree repos.</p>
 </div>
 
 <!-- ============================================================ -->
@@ -500,13 +515,12 @@ accepted_this_cycle = 0</code></pre>
 <div class="card">
   <table>
     <tr><th>Thread</th><th>Daemon?</th><th>Shared Resources</th></tr>
-    <tr><td>GroupWorker &times;3</td><td>Yes</td><td>git.Repo, Lock, Queue</td></tr>
+    <tr><td>GroupWorker &times;3</td><td>Yes</td><td>Worktree Repo (isolated), Lock, Queue</td></tr>
     <tr><td>CycleManager</td><td>Yes</td><td>Policies dict, Queue</td></tr>
     <tr><td>SyncScheduler</td><td>Yes</td><td>SyncEngine, Queue</td></tr>
   </table>
-  <p style="margin-top:0.8rem;"><strong>Lock strategy:</strong> A single <code>threading.Lock</code> serializes all <code>git checkout</code> operations.
-     Workers acquire the lock before checkout + commit, and the SyncEngine also checks out branches under the same lock (implicitly, via the repo object).
-     This prevents concurrent checkouts from corrupting the git index.</p>
+  <p style="margin-top:0.8rem;"><strong>Worktree isolation:</strong> Each branch gets a dedicated git worktree (<code>.worktrees/{branch}</code>), so workers can commit concurrently without checkout conflicts. The main repo is detached HEAD and used read-only.</p>
+  <p><strong>Lock strategy:</strong> A single <code>threading.Lock</code> serializes git operations that touch shared state (commit generation, sync file copies). This prevents concurrent writes from corrupting worktree indexes.</p>
   <p><strong>Event queue:</strong> All threads post structured dicts to a shared <code>queue.Queue</code>. The main loop pulls events with a 1-second timeout and logs them. This decouples event production from consumption.</p>
 </div>
 
@@ -515,7 +529,7 @@ accepted_this_cycle = 0</code></pre>
 
 <table>
   <tr><th>Package</th><th>Version</th><th>Purpose</th></tr>
-  <tr><td>gitpython</td><td>&ge; 3.1.43</td><td>Git operations (checkout, commit, format-patch, am)</td></tr>
+  <tr><td>gitpython</td><td>&ge; 3.1.43</td><td>Git operations (worktrees, commit, log, diff-tree)</td></tr>
   <tr><td>pyyaml</td><td>&ge; 6.0.1</td><td>Parse YAML policy configs</td></tr>
   <tr><td>pydantic</td><td>&ge; 2.7.0</td><td>Data validation (available but not currently used)</td></tr>
   <tr><td>streamlit</td><td>&ge; 1.35.0</td><td>Dashboard UI (skeleton only)</td></tr>
@@ -545,7 +559,7 @@ accepted_this_cycle = 0</code></pre>
     <tr>
       <td><code>group-unconstrained</code></td>
       <td>main</td>
-      <td>Refactored version (worktree support, clean.py). Diverges with <code>data/</code> commits</td>
+      <td>Diverges with auto-generated <code>data/group-unconstrained/</code> commits + synced data</td>
     </tr>
   </table>
 </div>

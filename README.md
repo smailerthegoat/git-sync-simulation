@@ -1,7 +1,7 @@
 # Git Sync Simulation
 
 A research demo simulating three independent groups evolving in parallel
-Git branches, synchronizing via policy-filtered patch exchange.
+Git branches, synchronizing via policy-filtered file-copy exchange.
 
 ## Overview
 
@@ -89,12 +89,19 @@ python clean.py
 
 ## How It Works
 
-1. **Startup**: Creates git worktrees for each branch, loads policies from YAML
-2. **Commit Generation**: Three worker threads generate random 0.8-3.2 MB commits every 12-22 seconds
+1. **Startup**: Creates a dedicated git worktree per branch (no checkout juggling), loads policies from YAML
+2. **Commit Generation**: Three worker threads generate random 0.8-3.2 MB commits every 12-22 seconds, each writing directly to its own worktree
 3. **Sync Scheduling**: Every 25-45 seconds, a random pair of branches is selected for sync
-4. **Policy Filtering**: The destination branch's policy decides which patches to accept or reject
-5. **Quota Management**: Every 60 seconds, the CycleManager recalculates quotas (carry-over logic)
-6. **Event Logging**: All events (COMMIT, SYNC, CYCLE_END, ERROR) are logged in real time
+4. **File-Copy Sync**: The SyncEngine identifies new `data/` commits on the source branch via `git log`, then copies accepted files directly from the source worktree into the destination worktree and commits
+5. **Policy Filtering**: The destination branch's policy decides which commits to accept or reject before files are copied
+6. **Quota Management**: Every 60 seconds, the CycleManager recalculates quotas (carry-over logic)
+7. **Event Logging**: All events (COMMIT, SYNC, CYCLE_END, ERROR) are logged in real time
+
+### Why file-copy instead of format-patch/git am?
+
+On WSL2/NTFS, `git am` and `format-patch` are fragile due to stat-cache dirty-index
+false positives. Direct file copy between worktrees avoids all index-lock and
+dirty-index issues entirely, making the simulation reliable on Windows/WSL.
 
 ## Dependencies
 
